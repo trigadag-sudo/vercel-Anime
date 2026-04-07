@@ -41,6 +41,17 @@ Write-File "$root\README.md" @'
    npm run dev
 
 ## API
+- `POST /api/auth/login` — отримати JWT через `apiKey`
+- `GET /api/anime` — список аніме
+- `POST /api/anime` — створити аніме (потрібен Bearer JWT)
+- `GET /api/anime/[id]` — аніме з епізодами
+- `GET /api/episodes/[id]/stream?audio=uk` — URL для стріму
+
+## Перевірка авторизації
+1. Отримати токен:
+   curl -X POST http://localhost:3000/api/auth/login -H "Content-Type: application/json" -d "{\"apiKey\":\"supersecretkey\"}"
+2. Створити аніме:
+   curl -X POST http://localhost:3000/api/anime -H "Authorization: Bearer <JWT>" -H "Content-Type: application/json" -d "{\"titleOriginal\":\"Naruto\",\"titleLocal\":\"Наруто\",\"year\":2002}"
 - `GET /api/anime` — список аніме
 - `GET /api/anime/[id]` — аніме з епізодами
 - `GET /api/episodes/[id]/stream?audio=uk` — URL для стріму
@@ -48,6 +59,9 @@ Write-File "$root\README.md" @'
 
 Write-File "$root\.env.example" @'
 DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/anime?schema=public
+API_KEY=supersecretkey
+JWT_SECRET=dev_jwt_secret
+JWT_EXPIRES_IN=7d
 
 S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
 S3_BUCKET=anime-media
@@ -69,8 +83,7 @@ Write-File "$root\package.json" @'
     "start": "next start -p 3000",
     "postinstall": "prisma generate",
     "seed": "ts-node --transpile-only prisma/seed.ts"
-  },
-  "prisma": {
+  },  "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"
   },
   "dependencies": {
@@ -78,6 +91,8 @@ Write-File "$root\package.json" @'
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "aws-sdk": "^2.1360.0",
+    "@prisma/client": "^5.0.0",
+    "jsonwebtoken": "^9.0.2"
     "@prisma/client": "^5.0.0"
   },
   "devDependencies": {
@@ -209,6 +224,93 @@ export async function getSignedUrl(key, expires = 3600) {
 }
 '@
 
+Write-File "$root\src\lib\jwt.js" @'
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = process.env.JWT_SECRET || "dev_jwt_secret";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
+
+export function sign(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
+
+export function verify(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+'@
+
+# src/pages/api
+Write-File "$root\src\pages\api\auth\login.js" @'
+import { sign } from "../../../../lib/jwt";
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    res.setHeader("Allow", ["POST"]);
+    return res.status(405).end();
+  }
+
+  const { apiKey } = req.body || {};
+  if (!apiKey || apiKey !== process.env.API_KEY) {
+    return res.status(401).json({ error: "Invalid API key" });
+  }
+
+  const token = sign({ role: "admin" });
+  return res.status(200).json({ token });
+}
+'@
+
+Write-File "$root\src\pages\api\anime\index.js" @'
+import { prisma } from "../../../lib/prisma";
+import { verify } from "../../../lib/jwt";
+
+export default async function handler(req, res) {
+  if (req.method === "GET") {
+    const list = await prisma.anime.findMany({
+      select: {
+        id: true,
+        titleOriginal: true,
+        titleLocal: true,
+        year: true,
+        posterUrl: true
+      },
+      orderBy: { id: "desc" }
+    });
+
+    return res.status(200).json(list);
+  }
+
+  if (req.method === "POST") {
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const payload = verify(token);
+    if (!payload || payload.role !== "admin") {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { titleOriginal, titleLocal, description, year, posterUrl } = req.body || {};
+    if (!titleOriginal) {
+      return res.status(400).json({ error: "titleOriginal is required" });
+    }
+
+    const created = await prisma.anime.create({
+      data: {
+        titleOriginal,
+        titleLocal: titleLocal || null,
+        description: description || null,
+        year: Number.isInteger(year) ? year : null,
+        posterUrl: posterUrl || null
+      }
+    });
+
+    return res.status(201).json(created);
+  }
+
+  res.setHeader("Allow", ["GET", "POST"]);
+  return res.status(405).end();
 # src/pages/api
 Write-File "$root\src\pages\api\anime\index.js" @'
 import { prisma } from "../../../../lib/prisma";
@@ -235,6 +337,7 @@ export default async function handler(req, res) {
 '@
 
 Write-File "$root\src\pages\api\anime\[id].js" @'
+import { prisma } from "../../../lib/prisma";
 import { prisma } from "../../../../lib/prisma";
 
 export default async function handler(req, res) {
@@ -266,6 +369,8 @@ export default async function handler(req, res) {
 '@
 
 Write-File "$root\src\pages\api\episodes\[id]\stream.js" @'
+import { prisma } from "../../../../lib/prisma";
+import { getSignedUrl } from "../../../../lib/s3";
 import { prisma } from "../../../../../lib/prisma";
 import { getSignedUrl } from "../../../../../lib/s3";
 
