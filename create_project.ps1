@@ -52,6 +52,9 @@ Write-File "$root\README.md" @'
    curl -X POST http://localhost:3000/api/auth/login -H "Content-Type: application/json" -d "{\"apiKey\":\"supersecretkey\"}"
 2. Створити аніме:
    curl -X POST http://localhost:3000/api/anime -H "Authorization: Bearer <JWT>" -H "Content-Type: application/json" -d "{\"titleOriginal\":\"Naruto\",\"titleLocal\":\"Наруто\",\"year\":2002}"
+- `GET /api/anime` — список аніме
+- `GET /api/anime/[id]` — аніме з епізодами
+- `GET /api/episodes/[id]/stream?audio=uk` — URL для стріму
 '@
 
 Write-File "$root\.env.example" @'
@@ -80,8 +83,7 @@ Write-File "$root\package.json" @'
     "start": "next start -p 3000",
     "postinstall": "prisma generate",
     "seed": "ts-node --transpile-only prisma/seed.ts"
-  },
-  "prisma": {
+  },  "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"
   },
   "dependencies": {
@@ -91,6 +93,7 @@ Write-File "$root\package.json" @'
     "aws-sdk": "^2.1360.0",
     "@prisma/client": "^5.0.0",
     "jsonwebtoken": "^9.0.2"
+    "@prisma/client": "^5.0.0"
   },
   "devDependencies": {
     "prisma": "^5.0.0",
@@ -308,11 +311,34 @@ export default async function handler(req, res) {
 
   res.setHeader("Allow", ["GET", "POST"]);
   return res.status(405).end();
+# src/pages/api
+Write-File "$root\src\pages\api\anime\index.js" @'
+import { prisma } from "../../../../lib/prisma";
+
+export default async function handler(req, res) {
+  if (req.method !== "GET") {
+    res.setHeader("Allow", ["GET"]);
+    return res.status(405).end();
+  }
+
+  const list = await prisma.anime.findMany({
+    select: {
+      id: true,
+      titleOriginal: true,
+      titleLocal: true,
+      year: true,
+      posterUrl: true
+    },
+    orderBy: { id: "desc" }
+  });
+
+  return res.status(200).json(list);
 }
 '@
 
 Write-File "$root\src\pages\api\anime\[id].js" @'
 import { prisma } from "../../../lib/prisma";
+import { prisma } from "../../../../lib/prisma";
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
@@ -345,6 +371,8 @@ export default async function handler(req, res) {
 Write-File "$root\src\pages\api\episodes\[id]\stream.js" @'
 import { prisma } from "../../../../lib/prisma";
 import { getSignedUrl } from "../../../../lib/s3";
+import { prisma } from "../../../../../lib/prisma";
+import { getSignedUrl } from "../../../../../lib/s3";
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
